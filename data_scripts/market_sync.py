@@ -67,52 +67,107 @@ FRED_INDICATORS = {
 }
 
 
+def get_fred_api_key():
+    """Resolve FRED API key from environment, Kaggle secrets, .env file, or fallback."""
+    key = os.environ.get("FRED_API_KEY")
+    if key:
+        return key.strip()
+    try:
+        from kaggle_secrets import UserSecretsClient
+        user_secrets = UserSecretsClient()
+        key = user_secrets.get_secret("FRED_API_KEY")
+        if key:
+            return key.strip()
+    except Exception:
+        pass
+    env_file = ROOT_DIR / ".env"
+    if env_file.exists():
+        try:
+            with open(env_file) as f:
+                for line in f:
+                    if line.startswith("FRED_API_KEY="):
+                        return line.split("=", 1)[1].strip().strip('"').strip("'")
+        except Exception:
+            pass
+    return "eab5c4fa956bada7be846a1f9052b64c"
+
+
+def fetch_single_fred_series(series_id, meta, start_date, api_key, session):
+    for attempt in range(2):
+        try:
+            if api_key:
+                url = f"https://api.stlouisfed.org/fred/series/observations?series_id={series_id}&api_key={api_key}&file_type=json"
+                if start_date:
+                    url += f"&observation_start={start_date}"
+                resp = session.get(url, timeout=8)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    obs = data.get("observations", [])
+                    if not obs:
+                        return None
+                    df = pd.DataFrame(obs)
+                    df = df[df["value"] != "."]
+                    if df.empty:
+                        return None
+                    df["date"] = pd.to_datetime(df["date"]).dt.date
+                    df["series_id"] = series_id
+                    df["value"] = pd.to_numeric(df["value"], errors="coerce")
+                    df["category"] = meta["category"]
+                    df["name"] = meta["name"]
+                    return df[["date", "series_id", "value", "category", "name"]].dropna(subset=["value"])
+            else:
+                url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
+                if start_date:
+                    url += f"&cosd={start_date}"
+                resp = session.get(url, timeout=8)
+                if resp.status_code == 200:
+                    df = pd.read_csv(io.StringIO(resp.text), na_values=".")
+                    date_col = "observation_date" if "observation_date" in df.columns else "DATE"
+                    if date_col in df.columns and series_id in df.columns:
+                        df = df.dropna(subset=[series_id, date_col])
+                        df["date"] = pd.to_datetime(df[date_col]).dt.date
+                        df["series_id"] = series_id
+                        df["value"] = pd.to_numeric(df[series_id], errors="coerce")
+                        df["category"] = meta["category"]
+                        df["name"] = meta["name"]
+                        return df[["date", "series_id", "value", "category", "name"]].dropna(subset=["value"])
+        except Exception:
+            if attempt < 1:
+                time.sleep(1.0)
+    print(f"  Warning: failed to fetch {series_id} (timeout or network)")
+    return None
+
+
 def sync_fred_indicators():
-    """Fetch full macro series from FRED and consolidate into single indicators.parquet."""
+    """Fetch macro series from FRED (high-speed REST API or CSV) and consolidate into indicators.parquet."""
     FRED_DIR.mkdir(parents=True, exist_ok=True)
     out_file = FRED_DIR / "indicators.parquet"
-    print(f"[FRED] Fetching {len(FRED_INDICATORS)} macro indicators from St. Louis Fed endpoints...")
 
-    all_records = []
-    success_count = 0
+    start_date = None
+    if out_file.exists():
+        con = duckdb.connect()
+        max_date = con.execute(f"SELECT MAX(date) FROM '{out_file}'").fetchone()[0]
+        con.close()
+        if max_date:
+            start_date = (pd.to_datetime(max_date) - pd.Timedelta(days=30)).strftime("%Y-%m-%d")
 
-    for series_id, meta in FRED_INDICATORS.items():
-        url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
-        resp = None
-        for attempt in range(2):
-            try:
-                resp = requests.get(url, headers=HEADERS, timeout=12)
-                if resp.status_code == 200:
-                    break
-            except Exception:
-                if attempt < 1:
-                    time.sleep(1.0)
+    api_key = get_fred_api_key()
+    mode = "Official REST API" if api_key else "Web CSV"
+    date_info = f"from {start_date}" if start_date else "full history"
+    print(f"[FRED] Fetching {len(FRED_INDICATORS)} macro indicators ({mode}, {date_info})...")
 
-        if resp is None or resp.status_code != 200:
-            print(f"  Warning: failed to fetch {series_id} (timeout or network)")
-            continue
+    session = requests.Session()
+    session.headers.update(HEADERS)
 
-        try:
-            df = pd.read_csv(io.StringIO(resp.text), na_values=".")
-            date_col = "observation_date" if "observation_date" in df.columns else "DATE"
-            if date_col not in df.columns or series_id not in df.columns:
-                continue
-
-            df = df.dropna(subset=[series_id, date_col])
-            df["date"] = pd.to_datetime(df[date_col]).dt.date
-            df["series_id"] = series_id
-            df["value"] = pd.to_numeric(df[series_id], errors="coerce")
-            df["category"] = meta["category"]
-            df["name"] = meta["name"]
-
-            clean_df = df[["date", "series_id", "value", "category", "name"]].dropna(subset=["value"])
-            all_records.append(clean_df)
-            success_count += 1
-        except Exception as e:
-            print(f"  Warning: failed to parse {series_id}: {e}")
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        futures = [
+            executor.submit(fetch_single_fred_series, sid, meta, start_date, api_key, session)
+            for sid, meta in FRED_INDICATORS.items()
+        ]
+        all_records = [f.result() for f in futures if f.result() is not None]
 
     if not all_records:
-        print("[FRED] Error: No macro data retrieved.")
+        print("[FRED] Warning: No new records to merge.")
         return
 
     df_incoming = pd.concat(all_records, ignore_index=True)
@@ -141,7 +196,6 @@ def sync_fred_indicators():
         table = pa.Table.from_pandas(df_incoming, preserve_index=False)
         pq.write_table(table, out_file, compression="zstd")
 
-    # Audit size
     con = duckdb.connect()
     row_count = con.execute(f"SELECT COUNT(*) FROM '{out_file}'").fetchone()[0]
     date_range = con.execute(f"SELECT MIN(date), MAX(date) FROM '{out_file}'").fetchone()

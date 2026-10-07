@@ -1,0 +1,18 @@
+# Core Analytical Database & Data Processing
+duckdb>=0.10.0
+pandas>=2.0.0
+pyarrow>=14.0.0
+
+# Market & Macro Data Ingestion
+yfinance>=0.2.36
+fredapi>=0.5.0
+requests>=2.31.0
+
+# Kaggle & Remote Storage Integration
+kaggle>=1.6.0
+kagglehub>=0.3.0
+python-dotenv>=1.0.0
+huggingface_hub>=0.20.0
+
+# Visualization & Notebook Cockpit
+plotly>=5.18.0

@@ -1,0 +1,14 @@
+# Environment & Secrets
+.env
+.venv/
+venv/
+
+# Python Cache
+__pycache__/
+*.py[cod]
+
+# Jupyter Checkpoints
+.ipynb_checkpoints/
+
+# Parquet Data Lakehouse (Managed via Kaggle Private Dataset)
+*.parquet

@@ -87,10 +87,12 @@ def sync_fred_indicators():
             except Exception:
                 if attempt < 2:
                     time.sleep(2.0)
+
         if resp is None or resp.status_code != 200:
             print(f"  Warning: failed to fetch {series_id} (timeout or network)")
             continue
 
+        try:
             df = pd.read_csv(io.StringIO(resp.text), na_values=".")
             date_col = "observation_date" if "observation_date" in df.columns else "DATE"
             if date_col not in df.columns or series_id not in df.columns:
@@ -107,7 +109,7 @@ def sync_fred_indicators():
             all_records.append(clean_df)
             success_count += 1
         except Exception as e:
-            print(f"  Warning: failed to fetch {series_id}: {e}")
+            print(f"  Warning: failed to parse {series_id}: {e}")
 
     if not all_records:
         print("[FRED] Error: No macro data retrieved.")

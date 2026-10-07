@@ -78,10 +78,18 @@ def sync_fred_indicators():
 
     for series_id, meta in FRED_INDICATORS.items():
         url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
-        try:
-            resp = requests.get(url, headers=HEADERS, timeout=30)
-            if resp.status_code != 200:
-                continue
+        resp = None
+        for attempt in range(3):
+            try:
+                resp = requests.get(url, headers=HEADERS, timeout=45)
+                if resp.status_code == 200:
+                    break
+            except Exception:
+                if attempt < 2:
+                    time.sleep(2.0)
+        if resp is None or resp.status_code != 200:
+            print(f"  Warning: failed to fetch {series_id} (timeout or network)")
+            continue
 
             df = pd.read_csv(io.StringIO(resp.text), na_values=".")
             date_col = "observation_date" if "observation_date" in df.columns else "DATE"

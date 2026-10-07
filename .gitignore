@@ -12,3 +12,5 @@ __pycache__/
 
 # Parquet Data Lakehouse (Managed via Kaggle Private Dataset)
 *.parquet
+
+README_sync.md

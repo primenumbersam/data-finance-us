@@ -68,18 +68,10 @@ FRED_INDICATORS = {
 
 
 def get_fred_api_key():
-    """Resolve FRED API key from environment, Kaggle secrets, .env file, or fallback."""
+    """Resolve FRED API key from environment, .env file, or default."""
     key = os.environ.get("FRED_API_KEY")
     if key:
         return key.strip()
-    try:
-        from kaggle_secrets import UserSecretsClient
-        user_secrets = UserSecretsClient()
-        key = user_secrets.get_secret("FRED_API_KEY")
-        if key:
-            return key.strip()
-    except Exception:
-        pass
     env_file = ROOT_DIR / ".env"
     if env_file.exists():
         try:
@@ -615,7 +607,7 @@ def sync_news_feed(backfill_from: str = None):
             latest_ts = con.execute(f"SELECT MAX(timestamp) FROM '{out_file}'").fetchone()[0]
             con.close()
             if latest_ts:
-                start_dt = pd.to_datetime(latest_ts) - pd.Timedelta(days=7)
+                start_dt = pd.to_datetime(latest_ts) - pd.Timedelta(days=3)
                 backfill_from = start_dt.strftime("%Y-%m-%d")
             else:
                 backfill_from = "2024-01-01"
@@ -833,6 +825,7 @@ def main():
     parser.add_argument("--skip-equities", action="store_true", help="Skip yfinance equity sync")
     parser.add_argument("--skip-news", action="store_true", help="Skip incremental news sync")
     parser.add_argument("--skip-indices", action="store_true", help="Skip primary indices sync")
+    parser.add_argument("--full-scan", action="store_true", help="Full re-scan of all 503 S&P 500 constituents to re-rank market caps (default: fast-update current universe)")
     parser.add_argument("--backfill-from", type=str, default=None, help="Backfill news from date (YYYY-MM-DD). If omitted, syncs dynamically from latest timestamp.")
     args = parser.parse_args()
 
@@ -840,7 +833,7 @@ def main():
         sync_fred_indicators()
 
     if not args.skip_equities:
-        sync_equities_and_constituents()
+        sync_equities_and_constituents(full_scan=args.full_scan)
 
     if not args.skip_indices:
         sync_indices()

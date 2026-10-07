@@ -1,5 +1,5 @@
 {
-  "last_sync_timestamp_utc": "2026-10-07T16:12:23.905893+00:00",
+  "last_sync_timestamp_utc": "2026-10-07T16:20:40.938549+00:00",
   "tables": {
     "constituents": {
       "rows": 5050,
@@ -26,7 +26,7 @@
       "max_date": "2026-10-07T00:00:00"
     },
     "news": {
-      "rows": 36725,
+      "rows": 36735,
       "min_timestamp": "2007-01-01 00:00:00",
       "max_timestamp": "2026-10-07 00:00:00"
     }

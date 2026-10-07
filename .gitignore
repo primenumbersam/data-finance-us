@@ -10,7 +10,5 @@ __pycache__/
 # Jupyter Checkpoints
 .ipynb_checkpoints/
 
-# Parquet Data Lakehouse (Managed via Kaggle Private Dataset)
+# Parquet Data Lakehouse (Local Storage)
 *.parquet
-
-README_sync.md

@@ -162,7 +162,7 @@ def get_current_sp500_tickers() -> list:
 from concurrent.futures import ThreadPoolExecutor
 
 
-def sync_equities_and_constituents(start_date: str = "2024-01-01"):
+def sync_equities_and_constituents(start_date: str = None, full_scan: bool = False):
     """
     1. Resolve 2024+ Top 50 constituents and current weights (constituents_current.parquet)
     2. Extract Buffer universe (~70 tickers) + SPY benchmark
@@ -170,14 +170,9 @@ def sync_equities_and_constituents(start_date: str = "2024-01-01"):
     """
     YFINANCE_DIR.mkdir(parents=True, exist_ok=True)
     LAKEHOUSE_DIR.mkdir(parents=True, exist_ok=True)
+    constituents_current_path = LAKEHOUSE_DIR / "constituents_current.parquet"
+    prices_inc_path = YFINANCE_DIR / "prices_incremental.parquet"
 
-    print("\n[Equities] Resolving current S&P 500 constituents and market caps...")
-    all_sp500 = get_current_sp500_tickers()
-    print(f"Total current S&P 500 constituents: {len(all_sp500)}")
-
-    # Step 1: Concurrent fetch of market caps across S&P 500 tickers
-    print("[Equities] Querying market capitalization concurrently across S&P 500 tickers...")
-    
     def fetch_single_cap(ticker_sym):
         try:
             t = yf.Ticker(ticker_sym)
@@ -188,47 +183,77 @@ def sync_equities_and_constituents(start_date: str = "2024-01-01"):
             pass
         return None
 
-    with ThreadPoolExecutor(max_workers=20) as executor:
-        cap_records = list(filter(None, executor.map(fetch_single_cap, all_sp500)))
+    if not full_scan and constituents_current_path.exists():
+        print("[Equities] Fast-updating existing constituents weights...")
+        df_prev = pd.read_parquet(constituents_current_path)
+        buffer_universe = df_prev["ticker"].unique().tolist()
+        if "SPY" not in buffer_universe:
+            buffer_universe.append("SPY")
 
-    if not cap_records:
-        print("[Equities] Error: Failed to resolve market caps.")
-        return
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            cap_records = list(filter(None, executor.map(fetch_single_cap, buffer_universe)))
 
-    df_caps = pd.DataFrame(cap_records).sort_values("market_cap", ascending=False).reset_index(drop=True)
-    df_caps["rank"] = range(1, len(df_caps) + 1)
-    print(f"[Equities] Successfully resolved market caps for {len(df_caps)} tickers.")
+        if cap_records:
+            df_caps = pd.DataFrame(cap_records).sort_values("market_cap", ascending=False).reset_index(drop=True)
+            df_caps["rank"] = range(1, len(df_caps) + 1)
+            top50 = df_caps.head(50).copy()
+            total_top50_mcap = top50["market_cap"].sum()
+            top50["weight"] = top50["market_cap"] / total_top50_mcap
+            top50["date"] = datetime.now(timezone.utc).date()
+            table_constituents = pa.Table.from_pandas(
+                top50[["date", "ticker", "market_cap", "rank", "weight"]],
+                preserve_index=False,
+            )
+            pq.write_table(table_constituents, constituents_current_path, compression="zstd")
+            print(f"[Equities] Saved current constituents: {constituents_current_path.name} (50 rows, total cap: )")
+    else:
+        print("[Equities] Resolving current S&P 500 constituents and market caps across all members...")
+        all_sp500 = get_current_sp500_tickers()
+        print(f"Total current S&P 500 constituents: {len(all_sp500)}")
+        with ThreadPoolExecutor(max_workers=15) as executor:
+            cap_records = list(filter(None, executor.map(fetch_single_cap, all_sp500)))
 
-    # Top 50 + ranks 51~70 (Buffer Pool) + SPY Benchmark
-    top50 = df_caps.head(50).copy()
-    total_top50_mcap = top50["market_cap"].sum()
-    top50["weight"] = top50["market_cap"] / total_top50_mcap
-    top50["date"] = datetime.now(timezone.utc).date()
+        if not cap_records:
+            print("[Equities] Error: Failed to resolve market caps.")
+            return
 
-    # Save constituents_current.parquet
-    constituents_current_path = LAKEHOUSE_DIR / "constituents_current.parquet"
-    table_constituents = pa.Table.from_pandas(
-        top50[["date", "ticker", "market_cap", "rank", "weight"]],
-        preserve_index=False,
-    )
-    pq.write_table(table_constituents, constituents_current_path, compression="zstd")
-    print(f"[Equities] Saved current constituents: {constituents_current_path.name} (50 rows, total cap: ${total_top50_mcap:,.0f})")
+        df_caps = pd.DataFrame(cap_records).sort_values("market_cap", ascending=False).reset_index(drop=True)
+        df_caps["rank"] = range(1, len(df_caps) + 1)
+        top50 = df_caps.head(50).copy()
+        total_top50_mcap = top50["market_cap"].sum()
+        top50["weight"] = top50["market_cap"] / total_top50_mcap
+        top50["date"] = datetime.now(timezone.utc).date()
+        table_constituents = pa.Table.from_pandas(
+            top50[["date", "ticker", "market_cap", "rank", "weight"]],
+            preserve_index=False,
+        )
+        pq.write_table(table_constituents, constituents_current_path, compression="zstd")
+        print(f"[Equities] Saved current constituents: {constituents_current_path.name} (50 rows, total cap: )")
+        buffer_universe = df_caps.head(70)["ticker"].tolist()
+        if "SPY" not in buffer_universe:
+            buffer_universe.append("SPY")
 
-    # Buffer universe: Top 70 + SPY
-    buffer_universe = df_caps.head(70)["ticker"].tolist()
-    if "SPY" not in buffer_universe:
-        buffer_universe.append("SPY")
+    if start_date is None:
+        if prices_inc_path.exists():
+            con = duckdb.connect()
+            max_date = con.execute(f"SELECT MAX(date) FROM '{prices_inc_path}'").fetchone()[0]
+            con.close()
+            if max_date:
+                start_date = (pd.to_datetime(max_date) - pd.Timedelta(days=5)).strftime("%Y-%m-%d")
+            else:
+                start_date = "2024-01-01"
+        else:
+            start_date = "2024-01-01"
 
     print(f"[Equities] Ingesting incremental OHLCV for Buffer Universe ({len(buffer_universe)} tickers, start={start_date})...")
-    # Batch download daily prices via yfinance
     df_download = yf.download(
         tickers=buffer_universe,
         start=start_date,
         interval="1d",
         auto_adjust=False,
         threads=True,
+        progress=False,
     )
-
     if df_download.empty:
         print("[Equities] Error: Downloaded price dataset is empty.")
         return
@@ -288,7 +313,7 @@ def sync_equities_and_constituents(start_date: str = "2024-01-01"):
 
 
 
-def sync_indices(tickers: list = None, start_date: str = "1999-01-01"):
+def sync_indices(tickers: list = None, start_date: str = None):
     """
     Fetch and synchronize primary market benchmark indices (^GSPC, ^NDX, ^DJI)
     into data-finance-us/yfinance/indices.parquet for ex-post labeling and regime analysis.
@@ -298,6 +323,19 @@ def sync_indices(tickers: list = None, start_date: str = "1999-01-01"):
 
     YFINANCE_DIR.mkdir(parents=True, exist_ok=True)
     out_file = YFINANCE_DIR / "indices.parquet"
+
+    if start_date is None:
+        if out_file.exists():
+            con = duckdb.connect()
+            max_date = con.execute(f"SELECT MAX(date) FROM '{out_file}'").fetchone()[0]
+            con.close()
+            if max_date:
+                start_date = (pd.to_datetime(max_date) - pd.Timedelta(days=5)).strftime("%Y-%m-%d")
+            else:
+                start_date = "1999-01-01"
+        else:
+            start_date = "1999-01-01"
+
     print(f"[Indices] Fetching market benchmark indices: {tickers} from {start_date}...")
 
     raw = yf.download(tickers, start=start_date, auto_adjust=False, progress=False)
@@ -328,9 +366,29 @@ def sync_indices(tickers: list = None, start_date: str = "1999-01-01"):
     df_indices = pd.concat(records, ignore_index=True)
     df_indices = df_indices.sort_values(["ticker", "date"]).reset_index(drop=True)
 
-    table = pa.Table.from_pandas(df_indices, preserve_index=False)
-    pq.write_table(table, out_file, compression="zstd")
-    print(f"[Indices] Successfully updated {out_file.name}: {len(df_indices):,} rows.")
+    if out_file.exists():
+        con = duckdb.connect()
+        con.register("incoming", df_indices)
+        con.execute(f"CREATE TABLE existing AS SELECT * FROM read_parquet('{out_file}')")
+        merged_query = f"""
+        COPY (
+            SELECT date, ticker, open, high, low, close, adj_close, volume FROM (
+                SELECT *, ROW_NUMBER() OVER (PARTITION BY date, ticker ORDER BY date) as rn
+                FROM (
+                    SELECT * FROM existing UNION ALL SELECT * FROM incoming
+                )
+            ) WHERE rn = 1
+            ORDER BY ticker, date
+        ) TO '{out_file}' (FORMAT 'PARQUET', COMPRESSION 'ZSTD');
+        """
+        con.execute(merged_query)
+        total_rows = con.execute(f"SELECT COUNT(*) FROM read_parquet('{out_file}')").fetchone()[0]
+        con.close()
+        print(f"[Indices] Successfully updated {out_file.name}: {total_rows:,} rows.")
+    else:
+        table = pa.Table.from_pandas(df_indices, preserve_index=False)
+        pq.write_table(table, out_file, compression="zstd")
+        print(f"[Indices] Successfully created {out_file.name}: {len(df_indices):,} rows.")
 
 
 def update_sync_state():
@@ -728,7 +786,7 @@ def main():
         sync_fred_indicators()
 
     if not args.skip_equities:
-        sync_equities_and_constituents(start_date="2024-01-01")
+        sync_equities_and_constituents()
 
     if not args.skip_indices:
         sync_indices()

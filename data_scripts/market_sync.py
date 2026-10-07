@@ -79,14 +79,14 @@ def sync_fred_indicators():
     for series_id, meta in FRED_INDICATORS.items():
         url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
         resp = None
-        for attempt in range(3):
+        for attempt in range(2):
             try:
-                resp = requests.get(url, headers=HEADERS, timeout=45)
+                resp = requests.get(url, headers=HEADERS, timeout=12)
                 if resp.status_code == 200:
                     break
             except Exception:
-                if attempt < 2:
-                    time.sleep(2.0)
+                if attempt < 1:
+                    time.sleep(1.0)
 
         if resp is None or resp.status_code != 200:
             print(f"  Warning: failed to fetch {series_id} (timeout or network)")

@@ -1,5 +1,5 @@
 """
-data_scripts/market_sync.py
+market_sync.py
 Incremental daily ETL pipeline for 2011~present:
 1. Macro indicators (FRED API & official endpoints based on arena/data)
 2. S&P 500 Top 50 + Buffer pool + SPY benchmark incremental OHLCV & Market Cap (yfinance)
@@ -22,7 +22,7 @@ import pyarrow.parquet as pq
 import requests
 import yfinance as yf
 
-ROOT_DIR = Path(__file__).resolve().parent.parent
+ROOT_DIR = Path(__file__).resolve().parent
 LAKEHOUSE_DIR = ROOT_DIR
 FRED_DIR = LAKEHOUSE_DIR / "fred"
 YFINANCE_DIR = LAKEHOUSE_DIR / "yfinance"

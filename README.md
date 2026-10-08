@@ -21,6 +21,7 @@ The lakehouse consolidates historical archives from FINSPID (1999–2023) with a
 ```text
 data-finance-us/                            # Project Root
 ├── main.ipynb                              # Primary interactive research cockpit & dashboard
+├── market_sync.py                          # Local incremental synchronization engine
 ├── requirements.txt                        # Python dependencies
 ├── README.md                               # Project technical documentation
 ├── sync_state.json                         # Automated sync telemetry and catalog metadata
@@ -29,10 +30,9 @@ data-finance-us/                            # Project Root
 ├── data_analyze/                           # Analytical notebooks & research documentation
 │   ├── extrema_local_offline.md            # Local extrema detection documentation
 │   └── extrema_ndx.ipynb                   # NDX extrema analysis notebook
-├── data_scripts/                           # Computational & synchronization engines
+├── data_scripts/                           # Computational & helper modules
 │   ├── extrema_local_offline.py            # Ground-truth extrema labeling script
 │   ├── finspid_diet.py                     # Historical FINSPID archive filtration
-│   ├── market_sync.py                      # Local incremental synchronization engine
 │   ├── portfolio_calc.py                   # Value-weighted performance calculation engine
 │   └── viz_render.py                       # Plotly & tabular rendering helpers
 ├── yfinance/                               # Market price series & benchmark indices
@@ -87,10 +87,10 @@ data-finance-us/                            # Project Root
 
 ## 4. Cache & Incremental Synchronization
 
-The synchronization engine in `data_scripts/market_sync.py` manages incremental data collection with native caching.
+The synchronization engine in `market_sync.py` manages incremental data collection with native caching.
 
 ```text
-[Local Synchronization Engine: data_scripts/market_sync.py]
+[Local Synchronization Engine: market_sync.py]
   │
   ├── 1. FRED Macro Series
   │      Inspects fred/indicators.parquet MAX(date)
@@ -160,22 +160,22 @@ FRED_API_KEY="your_fred_api_key_here"
 
 Execute standard daily incremental sync (fast-path, resumes from existing cache):
 ```bash
-python data_scripts/market_sync.py
+python market_sync.py
 ```
 
 Optional execution flags:
 ```bash
 # Full re-scan of all 503 S&P 500 constituents to re-rank weights (e.g. quarterly)
-python data_scripts/market_sync.py --full-scan
+python market_sync.py --full-scan
 
 # Skip specific domains during targeted testing
-python data_scripts/market_sync.py --skip-news
-python data_scripts/market_sync.py --skip-macro
-python data_scripts/market_sync.py --skip-equities
-python data_scripts/market_sync.py --skip-indices
+python market_sync.py --skip-news
+python market_sync.py --skip-macro
+python market_sync.py --skip-equities
+python market_sync.py --skip-indices
 
 # Custom historical news backfill from a specific date
-python data_scripts/market_sync.py --backfill-from 2026-01-01
+python market_sync.py --backfill-from 2026-01-01
 ```
 
 ---

@@ -3,7 +3,7 @@ market_sync.py
 Incremental daily ETL pipeline for 2011~present:
 1. Macro indicators (FRED API & official endpoints based on arena/data)
 2. S&P 500 Top 50 + Buffer pool + SPY benchmark incremental OHLCV & Market Cap (yfinance)
-3. Dynamic constituents resolution (constituents_current.parquet)
+3. Dynamic constituents resolution (constituents_incremental.parquet)
 4. Telemetry and state synchronization (sync_state.json)
 """
 
@@ -208,15 +208,66 @@ def get_current_sp500_tickers() -> list:
 from concurrent.futures import ThreadPoolExecutor
 
 
+def compute_quarterly_constituents(prices_path: Path) -> pd.DataFrame:
+    """Computes Top 50 constituents for historical quarter-ends (2024~present)."""
+    if not prices_path.exists():
+        return pd.DataFrame()
+
+    quarters = [
+        "2024-03-31", "2024-06-30", "2024-09-30", "2024-12-31",
+        "2025-03-31", "2025-06-30", "2025-09-30", "2025-12-31",
+        "2026-03-31", "2026-06-30", "2026-09-30"
+    ]
+    con = duckdb.connect()
+    dfs = []
+    for q in quarters:
+        sql = f"""
+        WITH latest_info AS (
+            SELECT ticker, close as latest_close, market_cap as latest_cap,
+                   market_cap / close as shares
+            FROM '{prices_path}'
+            WHERE date = (SELECT max(date) FROM '{prices_path}')
+              AND ticker != 'SPY'
+              AND market_cap IS NOT NULL AND close > 0
+        ),
+        q_prices AS (
+            SELECT p.ticker, p.close as q_close,
+                   p.close * l.shares as est_mcap
+            FROM '{prices_path}' p
+            JOIN latest_info l ON p.ticker = l.ticker
+            WHERE p.date = (SELECT max(date) FROM '{prices_path}' WHERE date <= '{q}')
+        ),
+        ranked AS (
+            SELECT '{q}'::DATE as date,
+                   ticker,
+                   est_mcap as market_cap,
+                   ROW_NUMBER() OVER (ORDER BY est_mcap DESC) as rank
+            FROM q_prices
+        )
+        SELECT date, ticker, market_cap, rank,
+               market_cap / (SELECT sum(market_cap) FROM ranked WHERE rank <= 50) as weight
+        FROM ranked
+        WHERE rank <= 50
+        ORDER BY rank
+        """
+        df_q = con.execute(sql).df()
+        if not df_q.empty:
+            dfs.append(df_q)
+    con.close()
+    if dfs:
+        return pd.concat(dfs, ignore_index=True)
+    return pd.DataFrame()
+
+
 def sync_equities_and_constituents(start_date: str = None, full_scan: bool = False):
     """
-    1. Resolve 2024+ Top 50 constituents and current weights (constituents_current.parquet)
+    1. Resolve 2024+ Top 50 constituents panel & current weights (constituents_incremental.parquet)
     2. Extract Buffer universe (~70 tickers) + SPY benchmark
     3. Ingest daily OHLCV and market cap increments (prices_incremental.parquet)
     """
     YFINANCE_DIR.mkdir(parents=True, exist_ok=True)
     LAKEHOUSE_DIR.mkdir(parents=True, exist_ok=True)
-    constituents_current_path = LAKEHOUSE_DIR / "constituents_current.parquet"
+    constituents_inc_path = LAKEHOUSE_DIR / "constituents_incremental.parquet"
     prices_inc_path = YFINANCE_DIR / "prices_incremental.parquet"
 
     def fetch_single_cap(ticker_sym):
@@ -229,10 +280,16 @@ def sync_equities_and_constituents(start_date: str = None, full_scan: bool = Fal
             pass
         return None
 
-    if not full_scan and constituents_current_path.exists():
+    df_existing = pd.DataFrame()
+    if constituents_inc_path.exists():
+        try:
+            df_existing = pd.read_parquet(constituents_inc_path)
+        except Exception:
+            df_existing = pd.DataFrame()
+
+    if not full_scan and not df_existing.empty:
         print("[Equities] Fast-updating existing constituents weights...")
-        df_prev = pd.read_parquet(constituents_current_path)
-        buffer_universe = df_prev["ticker"].unique().tolist()
+        buffer_universe = df_existing["ticker"].unique().tolist()
         if "SPY" not in buffer_universe:
             buffer_universe.append("SPY")
 
@@ -246,12 +303,6 @@ def sync_equities_and_constituents(start_date: str = None, full_scan: bool = Fal
             total_top50_mcap = top50["market_cap"].sum()
             top50["weight"] = top50["market_cap"] / total_top50_mcap
             top50["date"] = datetime.now(timezone.utc).date()
-            table_constituents = pa.Table.from_pandas(
-                top50[["date", "ticker", "market_cap", "rank", "weight"]],
-                preserve_index=False,
-            )
-            pq.write_table(table_constituents, constituents_current_path, compression="zstd")
-            print(f"[Equities] Saved current constituents: {constituents_current_path.name} (50 rows, total cap: )")
     else:
         print("[Equities] Resolving current S&P 500 constituents and market caps across all members...")
         all_sp500 = get_current_sp500_tickers()
@@ -269,15 +320,32 @@ def sync_equities_and_constituents(start_date: str = None, full_scan: bool = Fal
         total_top50_mcap = top50["market_cap"].sum()
         top50["weight"] = top50["market_cap"] / total_top50_mcap
         top50["date"] = datetime.now(timezone.utc).date()
-        table_constituents = pa.Table.from_pandas(
-            top50[["date", "ticker", "market_cap", "rank", "weight"]],
-            preserve_index=False,
-        )
-        pq.write_table(table_constituents, constituents_current_path, compression="zstd")
-        print(f"[Equities] Saved current constituents: {constituents_current_path.name} (50 rows, total cap: )")
         buffer_universe = df_caps.head(70)["ticker"].tolist()
         if "SPY" not in buffer_universe:
             buffer_universe.append("SPY")
+
+    # Combine quarterly panel and live top 50
+    df_quarterly = compute_quarterly_constituents(prices_inc_path)
+    combined_list = []
+    if not df_existing.empty:
+        combined_list.append(df_existing)
+    if not df_quarterly.empty:
+        combined_list.append(df_quarterly)
+    if "top50" in locals() and not top50.empty:
+        combined_list.append(top50[["date", "ticker", "market_cap", "rank", "weight"]])
+
+    if combined_list:
+        merged_panel = pd.concat(combined_list, ignore_index=True)
+        merged_panel["date"] = pd.to_datetime(merged_panel["date"]).dt.date
+        merged_panel = merged_panel.drop_duplicates(subset=["date", "ticker"], keep="last")
+        merged_panel = merged_panel.sort_values(["date", "rank"]).reset_index(drop=True)
+
+        table_constituents = pa.Table.from_pandas(
+            merged_panel[["date", "ticker", "market_cap", "rank", "weight"]],
+            preserve_index=False,
+        )
+        pq.write_table(table_constituents, constituents_inc_path, compression="zstd")
+        print(f"[Equities] Saved constituents panel: {constituents_inc_path.name} ({len(merged_panel)} total rows across {merged_panel['date'].nunique()} dates)")
 
     if start_date is None:
         if prices_inc_path.exists():

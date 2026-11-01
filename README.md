@@ -2,7 +2,7 @@
 
 A high-performance, local financial data lakehouse designed for quantitative research, macro regime analysis, and portfolio backtesting on US equities and economic indicators.
 
-The lakehouse consolidates historical archives from FINSPID (1999–2023) with an ultra-fast, cache-aware incremental synchronization engine (2024–present). Analytical exploration and visualization operate directly inside an interactive Jupyter Notebook cockpit (`main.ipynb`) via DuckDB and Plotly, with zero remote server daemons or web framework overhead.
+The lakehouse consolidates historical archives from FINSPID (1999–2023) with a fast, cache-aware incremental synchronization engine (2024–present). Analytical exploration and visualization operate directly inside an interactive Jupyter Notebook cockpit (`main.ipynb`) via DuckDB and Plotly, with zero remote server daemons or web framework overhead.
 
 ---
 
@@ -26,7 +26,7 @@ data-finance-us/                            # Project Root
 ├── README.md                               # Project technical documentation
 ├── sync_state.json                         # Automated sync telemetry and catalog metadata
 ├── constituents_1999_2023_finspid.parquet # Historical S&P 500 Top 50 constituents & weights (1999–2023)
-├── constituents_current.parquet           # 2024~present Top 50 constituents & live market caps
+├── constituents_incremental.parquet       # 2024~present Top 50 constituents & live market caps (Quarterly panel)
 ├── data_analyze/                           # Analytical notebooks & research documentation
 │   ├── extrema_local_offline.md            # Local extrema detection documentation
 │   └── extrema_ndx.ipynb                   # NDX extrema analysis notebook
@@ -37,7 +37,7 @@ data-finance-us/                            # Project Root
 │   └── viz_render.py                       # Plotly & tabular rendering helpers
 ├── yfinance/                               # Market price series & benchmark indices
 │   ├── indices.parquet                     # Market benchmark indices (^GSPC, ^NDX, ^DJI)
-│   ├── prices_1999_2023_finspid.parquet    # Historical daily OHLCV for Top 50 universe + SPY (1999–2023)
+│   ├── prices_1999_2023_finspid.parquet    # Historical daily OHLCV for Top 50 universe (1999–2023)
 │   └── prices_incremental.parquet          # Incremental daily OHLCV (2024~present)
 ├── fred/                                   # Macroeconomic indicators
 │   └── indicators.parquet                  # Consolidated macro series (FEDFUNDS, CPI, 10Y Yield, etc.)
@@ -98,7 +98,7 @@ The synchronization engine in `market_sync.py` manages incremental data collecti
   │      Deduplicates and merges via DuckDB into indicators.parquet (~2-3 sec)
   │
   ├── 2. Equities & Constituents
-  │      Fast-Path: checks constituents_current.parquet
+  │      Fast-Path: checks constituents_incremental.parquet panel
   │      Updates market caps for current universe (~50 tickers) concurrently
   │      Inspects yfinance/prices_incremental.parquet MAX(date)
   │      Batch downloads (max_date - 3d) ~ present via yfinance

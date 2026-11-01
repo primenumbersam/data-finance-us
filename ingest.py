@@ -1,10 +1,10 @@
 """
-market_sync.py
+ingest.py
 Incremental daily ETL pipeline for 2011~present:
 1. Macro indicators (FRED API & official endpoints based on arena/data)
 2. S&P 500 Top 50 + Buffer pool + SPY benchmark incremental OHLCV & Market Cap (yfinance)
-3. Dynamic constituents resolution (constituents_incremental.parquet)
-4. Telemetry and state synchronization (sync_state.json)
+3. Dynamic Big 50 constituents resolution (big50.parquet)
+4. Telemetry and state synchronization (current_state.json)
 """
 
 import argparse
@@ -23,10 +23,11 @@ import requests
 import yfinance as yf
 
 ROOT_DIR = Path(__file__).resolve().parent
-LAKEHOUSE_DIR = ROOT_DIR
-FRED_DIR = LAKEHOUSE_DIR / "fred"
-YFINANCE_DIR = LAKEHOUSE_DIR / "yfinance"
-NEWS_DIR = LAKEHOUSE_DIR / "news"
+DATA_DIR = ROOT_DIR / "data"
+LAKEHOUSE_DIR = DATA_DIR
+FRED_DIR = DATA_DIR
+YFINANCE_DIR = DATA_DIR
+NEWS_DIR = DATA_DIR
 
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
@@ -261,14 +262,14 @@ def compute_quarterly_constituents(prices_path: Path) -> pd.DataFrame:
 
 def sync_equities_and_constituents(start_date: str = None, full_scan: bool = False):
     """
-    1. Resolve 2024+ Top 50 constituents panel & current weights (constituents_incremental.parquet)
+    1. Resolve 2024+ Top 50 constituents panel & current weights (big50_incremental.parquet)
     2. Extract Buffer universe (~70 tickers) + SPY benchmark
     3. Ingest daily OHLCV and market cap increments (prices_incremental.parquet)
     """
     YFINANCE_DIR.mkdir(parents=True, exist_ok=True)
     LAKEHOUSE_DIR.mkdir(parents=True, exist_ok=True)
-    constituents_inc_path = LAKEHOUSE_DIR / "constituents_incremental.parquet"
-    prices_inc_path = YFINANCE_DIR / "prices_incremental.parquet"
+    big50_inc_path = DATA_DIR / "big50.parquet"
+    prices_inc_path = DATA_DIR / "prices.parquet"
 
     def fetch_single_cap(ticker_sym):
         try:
@@ -281,9 +282,9 @@ def sync_equities_and_constituents(start_date: str = None, full_scan: bool = Fal
         return None
 
     df_existing = pd.DataFrame()
-    if constituents_inc_path.exists():
+    if big50_inc_path.exists():
         try:
-            df_existing = pd.read_parquet(constituents_inc_path)
+            df_existing = pd.read_parquet(big50_inc_path)
         except Exception:
             df_existing = pd.DataFrame()
 
@@ -344,8 +345,8 @@ def sync_equities_and_constituents(start_date: str = None, full_scan: bool = Fal
             merged_panel[["date", "ticker", "market_cap", "rank", "weight"]],
             preserve_index=False,
         )
-        pq.write_table(table_constituents, constituents_inc_path, compression="zstd")
-        print(f"[Equities] Saved constituents panel: {constituents_inc_path.name} ({len(merged_panel)} total rows across {merged_panel['date'].nunique()} dates)")
+        pq.write_table(table_constituents, big50_inc_path, compression="zstd")
+        print(f"[Equities] Saved constituents panel: {big50_inc_path.name} ({len(merged_panel)} total rows across {merged_panel['date'].nunique()} dates)")
 
     if start_date is None:
         if prices_inc_path.exists():
@@ -391,7 +392,7 @@ def sync_equities_and_constituents(start_date: str = None, full_scan: bool = Fal
     df_incoming["market_cap"] = df_incoming["ticker"].map(mcap_map).astype(float)
 
     df_incoming_prices = df_incoming.dropna(subset=["close", "date"]).sort_values(["ticker", "date"]).reset_index(drop=True)
-    prices_inc_path = YFINANCE_DIR / "prices_incremental.parquet"
+    prices_inc_path = DATA_DIR / "prices.parquet"
 
     if prices_inc_path.exists():
         print(f"[Equities] Merging incoming records into {prices_inc_path.name}...")
@@ -506,8 +507,8 @@ def sync_indices(tickers: list = None, start_date: str = None):
 
 
 def update_sync_state():
-    """Produce global synchronization state telemetry (sync_state.json)."""
-    sync_state_path = LAKEHOUSE_DIR / "sync_state.json"
+    """Produce global synchronization state telemetry (current_state.json)."""
+    current_state_path = LAKEHOUSE_DIR / "current_state.json"
     con = duckdb.connect()
 
     telemetry = {
@@ -515,18 +516,18 @@ def update_sync_state():
         "tables": {},
     }
 
-    # Inspect constituents
-    const_files = list(LAKEHOUSE_DIR.glob("constituents_*.parquet"))
-    if const_files:
+    # Inspect big50
+    big50_files = list(LAKEHOUSE_DIR.glob("big50_*.parquet"))
+    if big50_files:
         info = con.execute(f"""
             SELECT 
                 COUNT(*) as rows, 
                 COUNT(DISTINCT ticker) as unique_tickers, 
                 MIN(date) as min_date, 
                 MAX(date) as max_date 
-            FROM read_parquet('{LAKEHOUSE_DIR}/constituents_*.parquet', union_by_name=true)
+            FROM read_parquet('{LAKEHOUSE_DIR}/big50_*.parquet', union_by_name=true)
         """).df().to_dict(orient="records")[0]
-        telemetry["tables"]["constituents"] = info
+        telemetry["tables"]["big50"] = info
 
     # Inspect prices
     price_files = list(YFINANCE_DIR.glob("prices_*.parquet"))
@@ -594,10 +595,10 @@ def update_sync_state():
             elif hasattr(v, "strftime"):
                 data[k] = str(v)
 
-    with open(sync_state_path, "w", encoding="utf-8") as f:
+    with open(current_state_path, "w", encoding="utf-8") as f:
         json.dump(telemetry, f, indent=2, ensure_ascii=False)
 
-    print(f"\n[Telemetry] Synchronized state catalog written to: {sync_state_path}")
+    print(f"\n[Telemetry] Synchronized state catalog written to: {current_state_path}")
 
 
 import re
@@ -667,7 +668,7 @@ def sync_news_feed(backfill_from: str = None):
     Saves to: news/news_incremental.parquet
     """
     NEWS_DIR.mkdir(parents=True, exist_ok=True)
-    out_file = NEWS_DIR / "news_incremental.parquet"
+    out_file = DATA_DIR / "news.parquet"
 
     if backfill_from is None:
         if out_file.exists():

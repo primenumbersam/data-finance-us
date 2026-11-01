@@ -21,12 +21,9 @@ The lakehouse consolidates historical archives from FINSPID (1999–2023) with a
 ```text
 data-finance-us/                            # Project Root
 ├── main.ipynb                              # Primary interactive research cockpit & dashboard
-├── market_sync.py                          # Local incremental synchronization engine
+├── ingest.py                               # Local incremental ingestion engine
 ├── requirements.txt                        # Python dependencies
 ├── README.md                               # Project technical documentation
-├── sync_state.json                         # Automated sync telemetry and catalog metadata
-├── constituents_1999_2023_finspid.parquet # Historical S&P 500 Top 50 constituents & weights (1999–2023)
-├── constituents_incremental.parquet       # 2024~present Top 50 constituents & live market caps (Quarterly panel)
 ├── data_analyze/                           # Analytical notebooks & research documentation
 │   ├── extrema_local_offline.md            # Local extrema detection documentation
 │   └── extrema_ndx.ipynb                   # NDX extrema analysis notebook
@@ -35,22 +32,23 @@ data-finance-us/                            # Project Root
 │   ├── finspid_diet.py                     # Historical FINSPID archive filtration
 │   ├── portfolio_calc.py                   # Value-weighted performance calculation engine
 │   └── viz_render.py                       # Plotly & tabular rendering helpers
-├── yfinance/                               # Market price series & benchmark indices
-│   ├── indices.parquet                     # Market benchmark indices (^GSPC, ^NDX, ^DJI)
-│   ├── prices_1999_2023_finspid.parquet    # Historical daily OHLCV for Top 50 universe (1999–2023)
-│   └── prices_incremental.parquet          # Incremental daily OHLCV (2024~present)
-├── fred/                                   # Macroeconomic indicators
-│   └── indicators.parquet                  # Consolidated macro series (FEDFUNDS, CPI, 10Y Yield, etc.)
-└── news/                                   # Financial news feeds
-    ├── news_1999_2010_finspid.parquet      # Curated legacy FINSPID macro news (2007–2010)
-    └── news_incremental.parquet            # Institutional news stream (2011~present)
+└── data/                                   # Unified flat lakehouse storage
+    ├── current_state.json                  # Automated ingestion telemetry and catalog metadata
+    ├── big50.parquet                       # S&P 500 Big 50 panel (2024~present)
+    ├── big50_1999_2023_finspid.parquet     # Historical S&P 500 Top 50 constituents & weights (1999–2023)
+    ├── indicators.parquet                  # Consolidated macro series (FEDFUNDS, CPI, 10Y Yield, etc.)
+    ├── indices.parquet                     # Market benchmark indices (^GSPC, ^NDX, ^DJI)
+    ├── prices.parquet                      # Incremental daily OHLCV for buffer universe (2024~present)
+    ├── prices_1999_2023_finspid.parquet    # Historical daily OHLCV for Top 50 universe (1999–2023)
+    ├── news.parquet                        # Institutional news stream (2011~present)
+    └── news_1999_2010_finspid.parquet      # Curated legacy FINSPID macro news (2007–2010)
 ```
 
 ---
 
 ## 3. Schema Definitions
 
-### 3.1 Constituents (`constituents_*.parquet`)
+### 3.1 Big 50 Constituents (`big50_*.parquet`)
 - `date`: DATE (Rebalancing or effective date)
 - `ticker`: VARCHAR (Equity symbol)
 - `market_cap`: DOUBLE (Market capitalization in USD)
@@ -87,37 +85,37 @@ data-finance-us/                            # Project Root
 
 ## 4. Cache & Incremental Synchronization
 
-The synchronization engine in `market_sync.py` manages incremental data collection with native caching.
+The ingestion engine in `ingest.py` manages incremental data collection with native caching.
 
 ```text
-[Local Synchronization Engine: market_sync.py]
+[Local Ingestion Engine: ingest.py]
   │
   ├── 1. FRED Macro Series
-  │      Inspects fred/indicators.parquet MAX(date)
+  │      Inspects data/indicators.parquet MAX(date)
   │      Fetches (max_date - 14d) ~ present via official FRED REST API (ThreadPoolExecutor, 8 workers)
   │      Deduplicates and merges via DuckDB into indicators.parquet (~2-3 sec)
   │
   ├── 2. Equities & Constituents
-  │      Fast-Path: checks constituents_incremental.parquet panel
+  │      Fast-Path: checks data/big50.parquet panel
   │      Updates market caps for current universe (~50 tickers) concurrently
-  │      Inspects yfinance/prices_incremental.parquet MAX(date)
+  │      Inspects data/prices.parquet MAX(date)
   │      Batch downloads (max_date - 3d) ~ present via yfinance
   │      Deduplicates and merges via DuckDB (~4-5 sec)
   │
   ├── 3. Market Benchmark Indices
-  │      Inspects yfinance/indices.parquet MAX(date)
+  │      Inspects data/indices.parquet MAX(date)
   │      Fetches (max_date - 3d) ~ present for ^GSPC, ^NDX, ^DJI
   │      Deduplicates and merges via DuckDB into indices.parquet (~2 sec)
   │
   ├── 4. Top-Down News Stream
-  │      Inspects news/news_incremental.parquet MAX(timestamp)
+  │      Inspects data/news.parquet MAX(timestamp)
   │      Queries Google News date-windows, Yahoo Finance search, and RSS feeds
   │      Filters invalid summaries and non-English text
   │      Deduplicates by headline and merges via DuckDB (~5-7 sec)
   │
   └── 5. State Telemetry
          Audits total row counts, date bounds, and table metrics
-         Writes fresh catalog to sync_state.json
+         Writes fresh catalog to data/current_state.json
 ```
 
 ### Execution Benchmarks (Local Workstation)
@@ -156,26 +154,26 @@ FRED_API_KEY="your_fred_api_key_here"
 
 *(If omitted, the engine uses the built-in project key).*
 
-### 5.3 Running Market Sync
+### 5.3 Running Ingestion Engine
 
-Execute standard daily incremental sync (fast-path, resumes from existing cache):
+Execute standard daily incremental ingestion (fast-path, resumes from existing cache):
 ```bash
-python market_sync.py
+python ingest.py
 ```
 
 Optional execution flags:
 ```bash
 # Full re-scan of all 503 S&P 500 constituents to re-rank weights (e.g. quarterly)
-python market_sync.py --full-scan
+python ingest.py --full-scan
 
 # Skip specific domains during targeted testing
-python market_sync.py --skip-news
-python market_sync.py --skip-macro
-python market_sync.py --skip-equities
-python market_sync.py --skip-indices
+python ingest.py --skip-news
+python ingest.py --skip-macro
+python ingest.py --skip-equities
+python ingest.py --skip-indices
 
 # Custom historical news backfill from a specific date
-python market_sync.py --backfill-from 2026-01-01
+python ingest.py --backfill-from 2026-01-01
 ```
 
 ---
@@ -197,19 +195,19 @@ import duckdb
 con = duckdb.connect()
 
 # Full prices (1999–present)
-con.execute("CREATE VIEW v_prices AS SELECT * FROM read_parquet('yfinance/*.parquet', union_by_name = true)")
+con.execute("CREATE VIEW v_prices AS SELECT * FROM read_parquet('data/prices*.parquet', union_by_name = true)")
 
 # Benchmark indices
-con.execute("CREATE VIEW v_indices AS SELECT * FROM read_parquet('yfinance/indices.parquet')")
+con.execute("CREATE VIEW v_indices AS SELECT * FROM read_parquet('data/indices.parquet')")
 
 # Macroeconomic indicators
-con.execute("CREATE VIEW v_macro AS SELECT * FROM read_parquet('fred/indicators.parquet')")
+con.execute("CREATE VIEW v_macro AS SELECT * FROM read_parquet('data/indicators.parquet')")
 
 # Full news stream (2007–present)
-con.execute("CREATE VIEW v_news AS SELECT * FROM read_parquet('news/*.parquet', union_by_name = true)")
+con.execute("CREATE VIEW v_news AS SELECT * FROM read_parquet('data/news*.parquet', union_by_name = true)")
 
 # Constituents & weights
-con.execute("CREATE VIEW v_constituents AS SELECT * FROM read_parquet('constituents_*.parquet', union_by_name = true)")
+con.execute("CREATE VIEW v_big50 AS SELECT * FROM read_parquet('data/big50*.parquet', union_by_name = true)")
 ```
 
 ### 6.2 Sequential Dashboard Views
